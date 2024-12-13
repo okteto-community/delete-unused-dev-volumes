@@ -1,0 +1,18 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: delete-dev-volumes
+spec:
+  schedule: "${JOB_SCHEDULE}"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: app
+              image: ${OKTETO_BUILD_APP_IMAGE}
+              imagePullPolicy: IfNotPresent
+              envFrom:
+                - secretRef:
+                    name: app-secret
+          restartPolicy: OnFailure
