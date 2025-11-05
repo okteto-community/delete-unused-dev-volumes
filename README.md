@@ -30,10 +30,24 @@ export JOB_SCHEDULE="0 20 * * *"
 
 For example, 0 0 13 * 5 states that the task must be started every Friday at midnight, as well as on the 13th of each month at midnight.
 
+- (Optional) Create a local variable to filter only personal namespaces:
+
+```bash
+export OKTETO_ONLY_PERSONAL_NAMESPACES=true
+```
+
+When set to `true`, the cronjob will only process personal namespaces (those with the `dev.okteto.com/default-namespace=true` label). Defaults to `false` if not set.
+
 - Run the following command to create the cronjob:
 
 ```bash
 okteto deploy -n ${NAMESPACE} --var OKTETO_ADMIN_TOKEN=${OKTETO_ADMIN_TOKEN} --var JOB_SCHEDULE=${JOB_SCHEDULE}
+```
+
+Or, if you want to filter only personal namespaces:
+
+```bash
+okteto deploy -n ${NAMESPACE} --var OKTETO_ADMIN_TOKEN=${OKTETO_ADMIN_TOKEN} --var JOB_SCHEDULE=${JOB_SCHEDULE} --var OKTETO_ONLY_PERSONAL_NAMESPACES=${OKTETO_ONLY_PERSONAL_NAMESPACES}
 ```
 
 ## Force the execution of the job

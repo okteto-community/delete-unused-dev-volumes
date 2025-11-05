@@ -12,6 +12,9 @@ spec:
             - name: app
               image: ${OKTETO_BUILD_APP_IMAGE}
               imagePullPolicy: IfNotPresent
+              env:
+                - name: OKTETO_ONLY_PERSONAL_NAMESPACES
+                  value: "${OKTETO_ONLY_PERSONAL_NAMESPACES}"
               envFrom:
                 - secretRef:
                     name: app-secret

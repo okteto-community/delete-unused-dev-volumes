@@ -20,6 +20,7 @@ func main() {
 	ctx := context.Background()
 	token := os.Getenv("OKTETO_TOKEN")
 	oktetoURL := os.Getenv("OKTETO_URL")
+	onlyPersonalNamespaces := os.Getenv("OKTETO_ONLY_PERSONAL_NAMESPACES") == "true"
 
 	logLevel := &slog.LevelVar{} // INFO
 	opts := &slog.HandlerOptions{
@@ -69,6 +70,21 @@ func main() {
 	for _, ns := range nsList {
 		logger.Info(fmt.Sprintf("Checking namespace '%s'", ns.Name))
 
+		// If OKTETO_ONLY_PERSONAL_NAMESPACES is true, skip non-personal namespaces
+		if onlyPersonalNamespaces {
+			isPersonal, err := isPersonalNamespace(ctx, clientset, ns.Name)
+			if err != nil {
+				logger.Error(fmt.Sprintf("Skipping ns %q because there was an error checking if namespace is personal: %s", ns.Name, err))
+				logger.Info("-----------------------------------------------")
+				continue
+			}
+			if !isPersonal {
+				logger.Info(fmt.Sprintf("Skipping ns %q because it is not a personal namespace", ns.Name))
+				logger.Info("-----------------------------------------------")
+				continue
+			}
+		}
+
 		// We retrieve all the PersistentVolumeClaims mounted in pods in the namespace
 		mountedPVCs, err := getMountedPVCs(ctx, clientset, ns.Name)
 		if err != nil {
@@ -105,6 +121,21 @@ func main() {
 
 		logger.Info("-----------------------------------------------")
 	}
+}
+
+// isPersonalNamespace checks if a namespace is a personal namespace by looking at the dev.okteto.com/default-namespace label
+func isPersonalNamespace(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (bool, error) {
+	ns, err := clientset.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+	if err != nil {
+		return false, err
+	}
+
+	// Personal namespaces have the dev.okteto.com/default-namespace label set to "true"
+	if value, exists := ns.Labels["dev.okteto.com/default-namespace"]; exists && value == "true" {
+		return true, nil
+	}
+
+	return false, nil
 }
 
 // deletePVC deletes the PersistentVolumeClaim with the given name in the given namespace
