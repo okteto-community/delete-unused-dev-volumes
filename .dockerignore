@@ -1,5 +1,6 @@
 # Ignore everything
 *
 
-# Allow only app directory
+# Allow only app directory and entrypoint script
 !/app
+!/entrypoint.sh

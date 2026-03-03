@@ -20,6 +20,9 @@ func main() {
 	ctx := context.Background()
 	token := os.Getenv("OKTETO_TOKEN")
 	oktetoURL := os.Getenv("OKTETO_URL")
+	onlyPersonalNamespaces := os.Getenv("OKTETO_ONLY_PERSONAL_NAMESPACES") == "true"
+	// Default to true to maintain backward compatibility - only delete dev volumes
+	devVolumesOnly := os.Getenv("OKTETO_DEV_VOLUMES") != "false"
 
 	logLevel := &slog.LevelVar{} // INFO
 	opts := &slog.HandlerOptions{
@@ -30,6 +33,15 @@ func main() {
 	if token == "" || oktetoURL == "" {
 		logger.Error("OKTETO_TOKEN and OKTETO_URL environment variables are required")
 		os.Exit(1)
+	}
+
+	if onlyPersonalNamespaces {
+		logger.Info("Only processing personal namespaces (OKTETO_ONLY_PERSONAL_NAMESPACES=true)")
+	}
+	if devVolumesOnly {
+		logger.Info("Only deleting dev volumes (OKTETO_DEV_VOLUMES=true)")
+	} else {
+		logger.Info("Deleting all unmounted PVCs (OKTETO_DEV_VOLUMES=false)")
 	}
 
 	u, err := url.Parse(oktetoURL)
@@ -69,6 +81,21 @@ func main() {
 	for _, ns := range nsList {
 		logger.Info(fmt.Sprintf("Checking namespace '%s'", ns.Name))
 
+		// Check if we should only process personal namespaces
+		if onlyPersonalNamespaces {
+			isPersonal, err := isPersonalNamespace(ctx, clientset, ns.Name)
+			if err != nil {
+				logger.Error(fmt.Sprintf("Skipping ns %q because there was an error checking if namespace is personal: %s", ns.Name, err))
+				logger.Info("-----------------------------------------------")
+				continue
+			}
+			if !isPersonal {
+				logger.Info(fmt.Sprintf("Skipping ns %q because it is not a personal namespace", ns.Name))
+				logger.Info("-----------------------------------------------")
+				continue
+			}
+		}
+
 		// We retrieve all the PersistentVolumeClaims mounted in pods in the namespace
 		mountedPVCs, err := getMountedPVCs(ctx, clientset, ns.Name)
 		if err != nil {
@@ -78,33 +105,47 @@ func main() {
 		}
 
 		// We retrieve all the PersistentVolumeClaims created by Okteto for development containers in the namespace
-		devPVCs, err := getOktetoDevPVCs(ctx, clientset, ns.Name)
+		allPVCs, err := getPVCs(ctx, clientset, ns.Name, devVolumesOnly)
 		if err != nil {
-			logger.Error(fmt.Sprintf("Skipping ns %q because there was an error checking dev PVCs for namespace: %s", ns.Name, err))
+			logger.Error(fmt.Sprintf("Skipping ns %q because there was an error checking PVCs for namespace: %s", ns.Name, err))
 			logger.Info("-----------------------------------------------")
 			continue
 		}
 
-		if len(devPVCs) == 0 {
-			logger.Info(fmt.Sprintf("Skipping ns %q because there are no dev PVCs", ns.Name))
+		if len(allPVCs) == 0 {
+			logger.Info(fmt.Sprintf("Skipping ns %q because there are no PVCs", ns.Name))
 		}
 
 		// For each dev PVC, we delete it if it is not mounted in any pod
-		for _, devPVC := range devPVCs {
-			if _, ok := mountedPVCs[devPVC]; ok {
-				logger.Info(fmt.Sprintf("Skipping PVC %q in namespace %q because it is mounted in a pod", devPVC, ns.Name))
+		for _, pvcName := range allPVCs {
+			if _, ok := mountedPVCs[pvcName]; ok {
+				logger.Info(fmt.Sprintf("Skipping PVC %q in namespace %q because it is mounted in a pod", pvcName, ns.Name))
 				continue
 			}
 
-			if err := deletePVC(ctx, clientset, ns.Name, devPVC); err != nil {
-				logger.Error(fmt.Sprintf("Error deleting PVC %q in namespace %q: %s", devPVC, ns.Name, err))
+			if err := deletePVC(ctx, clientset, ns.Name, pvcName); err != nil {
+				logger.Error(fmt.Sprintf("Error deleting PVC %q in namespace %q: %s", pvcName, ns.Name, err))
 			} else {
-				logger.Info(fmt.Sprintf("Deleted PVC %q in namespace %q", devPVC, ns.Name))
+				logger.Info(fmt.Sprintf("Deleted PVC %q in namespace %q", pvcName, ns.Name))
 			}
 		}
 
 		logger.Info("-----------------------------------------------")
 	}
+}
+
+func isPersonalNamespace(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (bool, error) {
+	ns, err := clientset.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+	if err != nil {
+		return false, err
+	}
+
+	// Check if the namespace has the dev.okteto.com/default-namespace label set to "true"
+	if val, ok := ns.Labels["dev.okteto.com/default-namespace"]; ok && val == "true" {
+		return true, nil
+	}
+
+	return false, nil
 }
 
 // deletePVC deletes the PersistentVolumeClaim with the given name in the given namespace
@@ -117,23 +158,30 @@ func deletePVC(ctx context.Context, clientset *kubernetes.Clientset, namespace, 
 	return nil
 }
 
-// getOktetoDevPVCs returns the names of the PersistentVolumeClaims created by Okteto for development containers in the given namespace
-func getOktetoDevPVCs(ctx context.Context, clientset *kubernetes.Clientset, namespace string) ([]string, error) {
-	labelSelector := fmt.Sprintf("dev.okteto.com=true")
-	opts := metav1.ListOptions{
-		LabelSelector: labelSelector,
+// getPVCs returns the names of PersistentVolumeClaims in the given namespace
+// If devVolumesOnly is true, only returns PVCs with the label dev.okteto.com=true
+// Otherwise returns all PVCs in the namespace
+func getPVCs(ctx context.Context, clientset *kubernetes.Clientset, namespace string, devVolumesOnly bool) ([]string, error) {
+	var opts metav1.ListOptions
+	if devVolumesOnly {
+		opts = metav1.ListOptions{
+			LabelSelector: "dev.okteto.com=true",
+		}
+	} else {
+		opts = metav1.ListOptions{}
 	}
+
 	pvcs, err := clientset.CoreV1().PersistentVolumeClaims(namespace).List(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
 
-	var devPVCs []string
+	var pvcNames []string
 	for _, pvc := range pvcs.Items {
-		devPVCs = append(devPVCs, pvc.Name)
+		pvcNames = append(pvcNames, pvc.Name)
 	}
 
-	return devPVCs, nil
+	return pvcNames, nil
 }
 
 // getMountedPVCs returns a map of PersistentVolumeClaims mounted in pods in the given namespace
